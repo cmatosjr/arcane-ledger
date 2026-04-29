@@ -7,7 +7,7 @@
 export default async function handler(req, res) {
   // CORS headers — allow any origin for beta testing
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') {
@@ -27,12 +27,20 @@ export default async function handler(req, res) {
   const url = `https://api.scryfall.com${path}${qs ? '?' + qs : ''}`;
 
   try {
-    const upstream = await fetch(url, {
+    const fetchOptions = {
+      method: req.method,
       headers: {
         'User-Agent': 'ArcaneLeader/1.0 (MTG deck analyzer beta)',
         'Accept': 'application/json',
       },
-    });
+    };
+
+    if (req.method === 'POST') {
+      fetchOptions.headers['Content-Type'] = 'application/json';
+      fetchOptions.body = JSON.stringify(req.body);
+    }
+
+    const upstream = await fetch(url, fetchOptions);
 
     const data = await upstream.json();
 

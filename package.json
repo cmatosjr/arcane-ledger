@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/build-prices.mjs && vite build",
+    "build:prices": "node scripts/build-prices.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

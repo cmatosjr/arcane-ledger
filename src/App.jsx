@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -26,51 +26,18 @@ const SAMPLE_DECK = `1 Sol Ring
 6 Forest
 7 Island`
 
-// ─── Scryfall helpers ─────────────────────────────────────────────────────────
+// ─── MTGJson price data ───────────────────────────────────────────────────────
 
-const sleep = ms => new Promise(r => setTimeout(r, ms))
+const normName = s => s.toLowerCase().replace(/[''`''ʼ]/g, "'")
 
-async function scryfallFetch(path, params = {}, attempt = 0) {
-  const qs = new URLSearchParams({ path, ...params }).toString()
-  const res = await fetch(`/api/scryfall?${qs}`)
-  if (res.status === 429) {
-    if (attempt < 4) {
-      await sleep(1000 * (attempt + 1))
-      return scryfallFetch(path, params, attempt + 1)
-    }
-    throw new Error('Scryfall rate limit exceeded')
-  }
-  if (!res.ok) throw new Error(`Scryfall ${res.status}: ${path}`)
-  return res.json()
-}
+let _priceData = null
 
-async function fetchCard(name) {
-  try {
-    return await scryfallFetch('/cards/named', { exact: name })
-  } catch (err) {
-    if (/rate limit/i.test(err.message)) throw err
-    try {
-      await sleep(120)
-      return await scryfallFetch('/cards/named', { fuzzy: name })
-    } catch (err2) {
-      if (/rate limit/i.test(err2.message)) throw err2
-      return null
-    }
-  }
-}
-
-async function fetchPrintings(oracleId) {
-  try {
-    const data = await scryfallFetch('/cards/search', {
-      q: `oracleid:${oracleId}`,
-      unique: 'prints',
-      order: 'usd',
-    })
-    return data.data || []
-  } catch (err) {
-    if (/rate limit/i.test(err.message)) throw err
-    return []
-  }
+async function loadPrices() {
+  if (_priceData) return _priceData
+  const res = await fetch('/prices.json')
+  if (!res.ok) throw new Error('Price data unavailable — run: npm run build:prices')
+  _priceData = await res.json()
+  return _priceData
 }
 
 // ─── Deck parser ──────────────────────────────────────────────────────────────
@@ -540,63 +507,51 @@ export default function App() {
   const [expensive, setExpensive]     = useState([])
   const [bulk, setBulk]               = useState([])
   const [errors, setErrors]           = useState([])
+  const [priceDate, setPriceDate]     = useState(null)
+
+  // Pre-fetch price data as soon as the app loads
+  useEffect(() => { loadPrices().then(d => setPriceDate(d.date)).catch(() => {}) }, [])
 
   const analyze = useCallback(async () => {
     const parsed = parseDecklist(deckText)
     if (!parsed.length) return
 
     setView(VIEWS.LOADING)
-    setProgress({ done: 0, total: parsed.length, current: '', completed: [] })
+    setProgress({ done: 0, total: parsed.length, current: 'Loading price data…', completed: [] })
+
+    let priceData
+    try {
+      priceData = await loadPrices()
+      setPriceDate(priceData.date)
+    } catch (err) {
+      setErrors([err.message])
+      setExpensive([])
+      setBulk([])
+      setView(VIEWS.RESULTS)
+      return
+    }
 
     const exp = [], blk = [], errs = []
 
-    for (let i = 0; i < parsed.length; i++) {
-      const { qty, name } = parsed[i]
-      setProgress(p => ({ ...p, current: name }))
-      await sleep(150)
+    for (const { qty, name } of parsed) {
+      const entry = priceData.cards[normName(name)]
+      if (!entry) { errs.push(name); continue }
 
-      try {
-        const card = await fetchCard(name)
-        if (!card) { errs.push(name); continue }
+      const { printings } = entry
+      const lowestPrice   = printings[0]?.price || null
+      const cardData      = { name: entry.name, qty, lowestPrice, printings }
 
-        await sleep(150)
-        const allPrints = await fetchPrintings(card.oracle_id)
-        await sleep(100)
-
-        const printings = allPrints
-          .map(p => ({
-            set: `${p.set_name} (${p.set.toUpperCase()})`,
-            price: p.prices?.usd || null,
-          }))
-          .sort((a, b) => {
-            if (!a.price && !b.price) return 0
-            if (!a.price) return 1
-            if (!b.price) return -1
-            return parseFloat(a.price) - parseFloat(b.price)
-          })
-
-        const lowestPrice = card.prices?.usd || printings.find(p => p.price)?.price || null
-        const cardData = { name: card.name, qty, lowestPrice, printings }
-
-        if (lowestPrice && parseFloat(lowestPrice) >= threshold) {
-          exp.push(cardData)
-        } else {
-          blk.push(cardData)
-        }
-      } catch {
-        errs.push(name)
+      if (lowestPrice && parseFloat(lowestPrice) >= threshold) {
+        exp.push(cardData)
+      } else {
+        blk.push(cardData)
       }
-
-      setProgress(p => ({
-        ...p,
-        done: i + 1,
-        completed: [...p.completed, name],
-      }))
     }
 
     exp.sort((a, b) => parseFloat(b.lowestPrice || 0) - parseFloat(a.lowestPrice || 0))
     blk.sort((a, b) => a.name.localeCompare(b.name))
 
+    setProgress(p => ({ ...p, done: parsed.length, completed: parsed.map(c => c.name) }))
     setExpensive(exp)
     setBulk(blk)
     setErrors(errs)
@@ -652,7 +607,7 @@ export default function App() {
           <div className="input-screen">
             <div className="input-intro">
               <h2>Analyze Your Commander Deck</h2>
-              <p>Paste your decklist below. Basic lands are removed automatically. Each card is looked up on Scryfall for current prices and all printings.</p>
+              <p>Paste your decklist below. Basic lands are removed automatically. Prices are sourced from MTGJson bulk data — no per-card API calls, instant results.</p>
             </div>
 
             <div className="input-card">
@@ -685,7 +640,8 @@ export default function App() {
             </div>
 
             <p style={{textAlign:'center',fontSize:12,color:'var(--text-dim)'}}>
-              Prices sourced live from Scryfall · Non-foil USD · Analysis takes ~1s per card
+              Prices from MTGJson · TCGPlayer non-foil USD
+              {priceDate && <> · Updated {priceDate}</>}
             </p>
           </div>
         )}
@@ -700,9 +656,7 @@ export default function App() {
                 <div className="progress-bar" style={{width:`${pct}%`}} />
               </div>
               <div className="progress-detail" style={{marginTop:8}}>
-                {progress.current
-                  ? <>Looking up <em style={{color:'var(--text-muted)'}}>{progress.current}</em></>
-                  : 'Starting…'}
+                <em style={{color:'var(--text-muted)'}}>{progress.current || 'Starting…'}</em>
                 &nbsp;·&nbsp;{progress.done}/{progress.total}
               </div>
             </div>

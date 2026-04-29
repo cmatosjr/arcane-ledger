@@ -30,9 +30,16 @@ const SAMPLE_DECK = `1 Sol Ring
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-async function scryfallFetch(path, params = {}) {
+async function scryfallFetch(path, params = {}, attempt = 0) {
   const qs = new URLSearchParams({ path, ...params }).toString()
   const res = await fetch(`/api/scryfall?${qs}`)
+  if (res.status === 429) {
+    if (attempt < 4) {
+      await sleep(1000 * (attempt + 1))
+      return scryfallFetch(path, params, attempt + 1)
+    }
+    throw new Error('Scryfall rate limit exceeded')
+  }
   if (!res.ok) throw new Error(`Scryfall ${res.status}: ${path}`)
   return res.json()
 }
@@ -40,10 +47,13 @@ async function scryfallFetch(path, params = {}) {
 async function fetchCard(name) {
   try {
     return await scryfallFetch('/cards/named', { exact: name })
-  } catch {
+  } catch (err) {
+    if (/rate limit/i.test(err.message)) throw err
     try {
+      await sleep(120)
       return await scryfallFetch('/cards/named', { fuzzy: name })
-    } catch {
+    } catch (err2) {
+      if (/rate limit/i.test(err2.message)) throw err2
       return null
     }
   }
@@ -57,7 +67,8 @@ async function fetchPrintings(oracleId) {
       order: 'usd',
     })
     return data.data || []
-  } catch {
+  } catch (err) {
+    if (/rate limit/i.test(err.message)) throw err
     return []
   }
 }
@@ -542,14 +553,15 @@ export default function App() {
     for (let i = 0; i < parsed.length; i++) {
       const { qty, name } = parsed[i]
       setProgress(p => ({ ...p, current: name }))
-      await sleep(80) // be polite to Scryfall
+      await sleep(150)
 
       try {
         const card = await fetchCard(name)
         if (!card) { errs.push(name); continue }
 
+        await sleep(150)
         const allPrints = await fetchPrintings(card.oracle_id)
-        await sleep(60)
+        await sleep(100)
 
         const printings = allPrints
           .map(p => ({

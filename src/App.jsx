@@ -31,9 +31,8 @@ const SAMPLE_DECK = `1 Sol Ring
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 async function scryfallFetch(path, params = {}) {
-  const qs = new URLSearchParams(params).toString()
-  const url = `https://api.scryfall.com${path}${qs ? "?" + qs : ""}`
-  const res = await fetch(url)
+  const qs = new URLSearchParams({ path, ...params }).toString()
+  const res = await fetch(`/api/scryfall?${qs}`)
   if (!res.ok) throw new Error(`Scryfall ${res.status}: ${path}`)
   return res.json()
 }

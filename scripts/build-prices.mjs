@@ -1,18 +1,14 @@
 #!/usr/bin/env node
 /**
- * Downloads MTGJson bulk data and writes public/prices.json.
+ * Downloads Scryfall's bulk card data and writes public/prices.json.
  * Skips if the existing file is less than 20 hours old.
  *
  * Usage:
  *   node scripts/build-prices.mjs
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
-import { gunzip } from 'node:zlib'
-import { promisify } from 'node:util'
 
-const gunzipAsync = promisify(gunzip)
-const BASE = 'https://mtgjson.com/api/v5'
-const OUT  = 'public/prices.json'
+const OUT = 'public/prices.json'
 
 const SKIP_LAYOUTS = new Set([
   'token', 'double_faced_token', 'art_series', 'emblem',
@@ -21,19 +17,8 @@ const SKIP_LAYOUTS = new Set([
 
 const normName = s => s.toLowerCase().replace(/[''`‘’ʼ]/g, "'")
 
-async function fetchGzip(name) {
-  process.stdout.write(`  ${name}... `)
-  const res = await fetch(`${BASE}/${name}.json.gz`)
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${name}`)
-  const buf = Buffer.from(await res.arrayBuffer())
-  process.stdout.write(`${(buf.length / 1e6).toFixed(1)}MB → parsing... `)
-  const json = JSON.parse((await gunzipAsync(buf)).toString('utf8'))
-  console.log('done')
-  return json
-}
-
 async function main() {
-  // Skip re-download if file is recent enough
+  // Skip if the existing file is recent enough
   if (existsSync(OUT)) {
     try {
       const { date } = JSON.parse(readFileSync(OUT, 'utf8'))
@@ -45,66 +30,57 @@ async function main() {
     } catch {}
   }
 
-  console.log('Downloading MTGJson bulk data...')
-  const [identifiers, prices, setList] = await Promise.all([
-    fetchGzip('AllIdentifiers'),
-    fetchGzip('AllPrices'),
-    fetchGzip('SetList'),
-  ])
+  // Step 1: get the download URL from Scryfall's bulk-data manifest
+  process.stdout.write('Fetching Scryfall bulk-data manifest... ')
+  const manifest = await fetch('https://api.scryfall.com/bulk-data').then(r => r.json())
+  const entry    = manifest.data.find(d => d.type === 'default_cards')
+  if (!entry) throw new Error('default_cards not found in Scryfall bulk-data manifest')
+  console.log(`found (${(entry.size / 1e6).toFixed(0)}MB)`)
 
-  // set code (uppercase) → set name
-  const setNames = Object.fromEntries(
-    (setList.data ?? []).map(s => [s.code.toUpperCase(), s.name])
-  )
+  // Step 2: download — Scryfall serves this gzip-compressed; fetch decodes automatically
+  process.stdout.write('Downloading... ')
+  const cards = await fetch(entry.download_uri).then(r => r.json())
+  console.log(`${cards.length.toLocaleString()} printings`)
 
-  console.log('Building price index...')
+  // Step 3: group by card name, cheapest printing first
+  process.stdout.write('Building price index... ')
   const cardMap = {}
 
-  for (const [uuid, card] of Object.entries(identifiers.data)) {
+  for (const card of cards) {
     if (SKIP_LAYOUTS.has(card.layout)) continue
-    if (!card.availability?.includes('paper')) continue
+    const price = card.prices?.usd
+    if (!price || parseFloat(price) <= 0) continue
 
-    const retail = prices.data[uuid]?.paper?.tcgplayer?.retail?.normal
-    if (!retail) continue
-
-    const latestDate = Object.keys(retail).sort().at(-1)
-    if (!latestDate) continue
-    const price = retail[latestDate]
-    if (!price || price <= 0) continue
-
-    const code = card.setCode.toUpperCase()
-    const printing = {
-      set: `${setNames[code] ?? code} (${code})`,
-      price: price.toFixed(2),
-    }
-
-    // Index by full name; also index by front face for DFCs and split cards
-    const names = [card.name]
-    const front = card.name.split(' // ')[0].trim()
-    if (front !== card.name) names.push(front)
-
-    for (const n of names) {
-      const key = normName(n)
-      if (!cardMap[key]) cardMap[key] = { name: n, printings: [] }
-      cardMap[key].printings.push(printing)
-    }
+    const key = normName(card.name)
+    if (!cardMap[key]) cardMap[key] = { name: card.name, printings: [] }
+    cardMap[key].printings.push({
+      set: `${card.set_name} (${card.set.toUpperCase()})`,
+      price,
+    })
   }
 
-  // Sort each card's printings cheapest first
-  for (const card of Object.values(cardMap)) {
-    card.printings.sort((a, b) => parseFloat(a.price) - parseFloat(b.price))
+  for (const c of Object.values(cardMap)) {
+    c.printings.sort((a, b) => parseFloat(a.price) - parseFloat(b.price))
+  }
+
+  // Index DFCs and split cards by front-face name so "Delver of Secrets" matches
+  for (const [key, card] of Object.entries({ ...cardMap })) {
+    const front    = card.name.split(' // ')[0].trim()
+    const frontKey = normName(front)
+    if (frontKey !== key && !cardMap[frontKey]) cardMap[frontKey] = card
   }
 
   if (!existsSync('public')) mkdirSync('public', { recursive: true })
 
-  const output = { date: identifiers.meta.date, cards: cardMap }
+  const date   = entry.updated_at.slice(0, 10)
+  const output = { date, cards: cardMap }
   const json   = JSON.stringify(output)
   writeFileSync(OUT, json)
 
-  const mb    = (Buffer.byteLength(json) / 1e6).toFixed(1)
   const count = Object.keys(cardMap).length
-  console.log(`\n✓ ${count.toLocaleString()} cards → ${OUT} (${mb}MB)`)
-  console.log(`  Data date: ${output.date}`)
+  const mb    = (Buffer.byteLength(json) / 1e6).toFixed(1)
+  console.log(`${count.toLocaleString()} unique cards`)
+  console.log(`\n✓ ${OUT} (${mb}MB) — data date: ${date}`)
 }
 
 main().catch(err => { console.error(err.message); process.exit(1) })

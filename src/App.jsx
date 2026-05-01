@@ -459,6 +459,10 @@ function buildText(cards, isExpensive) {
   }).join('\n')
 }
 
+function buildTCGPlayerText(cards) {
+  return cards.map(c => `${c.qty} ${c.name}`).join('\n')
+}
+
 function CardRow({ card, threshold, isExpensive }) {
   const [expanded, setExpanded] = useState(false)
   const printings = card.printings || []
@@ -727,7 +731,10 @@ export default function App() {
                     <div className="panel-title">◈ Bulk Pull List</div>
                     <div className="panel-count">{bulk.length} cards — pull from your collection</div>
                   </div>
-                  <CopyBtn text={buildText(bulk, false)} label="Copy" />
+                  <div style={{display:'flex',gap:6}}>
+                    <CopyBtn text={buildTCGPlayerText(bulk)} label="TCGPlayer" />
+                    <CopyBtn text={buildText(bulk, false)} label="Copy" />
+                  </div>
                 </div>
                 <div className="panel-body">
                   {bulk.length === 0
